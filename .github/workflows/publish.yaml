@@ -1,9 +1,10 @@
 name: Publish bundle to charm store
 
 on:
-  push:
-    branches:
-      - master
+  - push
+  # push:
+  #   branches:
+  #     - master
 
 jobs:
   build:
@@ -18,10 +19,10 @@ jobs:
       run: |
         set -eux
         sudo snap install charm --classic
-        sudo snap install juju-helpers --classic --channel edge
+        sudo snap install juju-bundle --classic
         sudo apt update
         sudo apt install python3-pip
-        sudo pip3 install charmcraft==1.0.0
+        sudo pip3 install charmcraft==1.3.1
 
     - name: Publish bundle
       env:
@@ -31,5 +32,6 @@ jobs:
         echo $CHARMSTORE_CREDENTIAL > ~/.go-cookies
         juju-bundle publish \
             --url cs:~istio-charmers/istio \
-            --publish-charms \
-            --publish-namespace istio-charmers
+            --publish-namespace istio-charmers \
+            --destructive-mode \
+            --serial
