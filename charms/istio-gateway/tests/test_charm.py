@@ -3,11 +3,51 @@ import yaml
 from charm import Operator
 from ops.model import ActiveStatus, BlockedStatus, WaitingStatus
 from ops.testing import Harness
+from lightkube.core.exceptions import LoadResourceError
 
 
 @pytest.fixture
 def harness():
     return Harness(Operator)
+
+
+@pytest.fixture(params=["ingress", "egress"])
+def kind(request):
+    return request.param
+
+
+@pytest.fixture()
+def configured_harness(harness, kind, mocker):
+    mocker.patch('lightkube.Client.apply')
+    harness.set_leader(True)
+
+    harness.update_config({'kind': kind})
+    harness.add_oci_resource(
+        "noop",
+        {
+            "registrypath": "",
+            "username": "",
+            "password": "",
+        },
+    )
+    rel_id = harness.add_relation("istio-pilot", "app")
+
+    harness.add_relation_unit(rel_id, "app/0")
+    data = {"service-name": "service-name", "service-port": '6666'}
+    harness.update_relation_data(
+        rel_id,
+        "app",
+        {"_supported_versions": "- v1", "data": yaml.dump(data)},
+    )
+
+    return harness
+
+
+def begin_noop(harness):
+    # Most of the tests use these lines to kick things off
+    harness.begin_with_initial_hooks()
+    container = harness.model.unit.get_container('noop')
+    harness.charm.on['noop'].pebble_ready.emit(container)
 
 
 def test_not_leader(harness):
@@ -25,91 +65,85 @@ def test_kind_no_rel(harness, mocker):
     harness.set_leader(True)
 
     harness.update_config({'kind': 'ingress'})
-    harness.begin_with_initial_hooks()
 
-    container = harness.model.unit.get_container('noop')
-    harness.charm.on['noop'].pebble_ready.emit(container)
+    begin_noop(harness)
 
     assert harness.charm.model.unit.status == BlockedStatus('Waiting for istio-pilot relation')
 
 
-def test_kind_ingress(harness, mocker):
-    run = mocker.patch('subprocess.run')
-    harness.set_leader(True)
+def get_unique_calls(call_args_list):
+    uniques = []
+    for call in call_args_list:
+        if call in uniques:
+            continue
+        else:
+            uniques.append(call)
 
-    harness.update_config({'kind': 'ingress'})
-    harness.add_oci_resource(
-        "noop",
-        {
-            "registrypath": "",
-            "username": "",
-            "password": "",
-        },
-    )
-    rel_id = harness.add_relation("istio-pilot", "app")
-
-    harness.add_relation_unit(rel_id, "app/0")
-    data = {"service-name": "service-name", "service-port": '6666'}
-    harness.update_relation_data(
-        rel_id,
-        "app",
-        {"_supported_versions": "- v1", "data": yaml.dump(data)},
-    )
-
-    harness.begin_with_initial_hooks()
-
-    container = harness.model.unit.get_container('noop')
-    harness.charm.on['noop'].pebble_ready.emit(container)
-
-    assert len(run.call_args_list) == 4
-
-    expected_args = (['./kubectl', 'apply', '-f-'],)
-    expected_input = list(yaml.safe_load_all(open('tests/ingress-example.yaml')))
-
-    for call in run.call_args_list:
-        actual_input = list(yaml.safe_load_all(call.kwargs['input']))
-        assert call.args == expected_args
-        assert expected_input == actual_input
-
-    assert harness.charm.model.unit.status == ActiveStatus('')
+    return uniques
 
 
-def test_kind_egress(harness, mocker):
-    run = mocker.patch('subprocess.run')
-    harness.set_leader(True)
+def test_install_apply(configured_harness, kind, mocker):
+    apply = mocker.patch('lightkube.Client.apply')
 
-    harness.update_config({'kind': 'egress'})
-    harness.add_oci_resource(
-        "noop",
-        {
-            "registrypath": "",
-            "username": "",
-            "password": "",
-        },
-    )
-    rel_id = harness.add_relation("istio-pilot", "app")
+    begin_noop(configured_harness)
 
-    harness.add_relation_unit(rel_id, "app/0")
-    data = {"service-name": "service-name", "service-port": '6666'}
-    harness.update_relation_data(
-        rel_id,
-        "app",
-        {"_supported_versions": "- v1", "data": yaml.dump(data)},
-    )
+    actual_objects = []
+    expected_objects = list(yaml.safe_load_all(open(f'tests/{kind}-example.yaml')))
 
-    harness.begin_with_initial_hooks()
+    # The install method is invoked multiple times, and the apply method is called for every object in the manifest
+    # but we will ignore the duplicated entries in the call list
+    for call in get_unique_calls(apply.call_args_list):
+        # Ensure the server side apply calls include the namespace kwarg
+        assert call.kwargs['namespace'] == 'None'
+        # The first (and only) argument to the apply method is the obj
+        # Convert the object to a dictionary and add it to the list
+        actual_objects.append(call.args[0].to_dict())
 
-    container = harness.model.unit.get_container('noop')
-    harness.charm.on['noop'].pebble_ready.emit(container)
+    assert expected_objects == actual_objects
+    assert configured_harness.charm.model.unit.status == ActiveStatus('')
 
-    assert len(run.call_args_list) == 4
 
-    expected_args = (['./kubectl', 'apply', '-f-'],)
-    expected_input = list(yaml.safe_load_all(open('tests/egress-example.yaml')))
+def test_install_apply_with_load_resource_error(configured_harness, kind, mocker):
+    mocker.patch('lightkube.codecs.load_all_yaml', side_effect=LoadResourceError('mocked error'))
 
-    for call in run.call_args_list:
-        actual_input = list(yaml.safe_load_all(call.kwargs['input']))
-        assert call.args == expected_args
-        assert expected_input == actual_input
+    begin_noop(configured_harness)
 
-    assert harness.charm.model.unit.status == ActiveStatus('')
+    assert configured_harness.charm.model.unit.status == BlockedStatus('mocked error')
+
+
+def test_removal(configured_harness, kind, mocker):
+    delete = mocker.patch('lightkube.Client.delete')
+
+    begin_noop(configured_harness)
+
+    configured_harness.charm.on.remove.emit()
+
+    # Ensure the objects that get deleted are the objects defined in the example yaml files
+    actual_kind_name_list = []
+    expected_objects = list(yaml.safe_load_all(open(f'tests/{kind}-example.yaml')))
+    expected_kind_name_list = []
+    for obj in expected_objects:
+        kind_name = {'kind': obj['kind'], 'name': obj['metadata']['name']}
+        expected_kind_name_list.append(kind_name)
+
+    for call in delete.call_args_list:
+        # Ensure the server side apply calls include the namespace kwarg ('None' in the example yaml)
+        assert call.kwargs['namespace'] == 'None'
+        # The first argument is the resource class
+        # The second argument is the object name
+        kind_name = {'kind': call.args[0].__name__, 'name': call.args[1]}
+        actual_kind_name_list.append(kind_name)
+
+    assert expected_kind_name_list == actual_kind_name_list
+
+
+def test_removal_with_load_resource_error(configured_harness, mocker):
+    mocker.patch('lightkube.codecs.load_all_yaml', side_effect=LoadResourceError('mocked error'))
+
+    begin_noop(configured_harness)
+    configured_harness.charm.on.remove.emit()
+
+    assert configured_harness.charm.model.unit.status == BlockedStatus('mocked error')
+
+
+

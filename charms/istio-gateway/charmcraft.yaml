@@ -9,6 +9,8 @@ bases:
 parts:
   charm:
     charm-python-packages: [setuptools, pip]
+    build-packages:
+      - git
   kubectl:
     plugin: dump
     source: .
