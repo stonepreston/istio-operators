@@ -6,6 +6,13 @@ from ops.testing import Harness
 from lightkube.core.exceptions import LoadResourceError
 
 
+# Autouse to prevent calling out to the k8s API via lightkube
+@pytest.fixture(autouse=True)
+def mocked_client(mocker):
+    client = mocker.patch("charm.Client")
+    yield client
+
+
 @pytest.fixture
 def harness():
     return Harness(Operator)
@@ -17,8 +24,7 @@ def kind(request):
 
 
 @pytest.fixture()
-def configured_harness(harness, kind, mocker):
-    mocker.patch('lightkube.Client.apply')
+def configured_harness(harness, kind):
     harness.set_leader(True)
 
     harness.update_config({'kind': kind})
@@ -43,6 +49,12 @@ def configured_harness(harness, kind, mocker):
     return harness
 
 
+@pytest.fixture()
+def mocked_load_all_yaml(mocker):
+    load_all_yaml = mocker.patch('charm.codecs.load_all_yaml', side_effect=LoadResourceError('mocked error'))
+    yield load_all_yaml
+
+
 def begin_noop(harness):
     # Most of the tests use these lines to kick things off
     harness.begin_with_initial_hooks()
@@ -61,7 +73,7 @@ def test_no_kind(harness):
     assert harness.charm.model.unit.status == BlockedStatus('Config item `kind` must be set')
 
 
-def test_kind_no_rel(harness, mocker):
+def test_kind_no_rel(harness):
     harness.set_leader(True)
 
     harness.update_config({'kind': 'ingress'})
@@ -82,9 +94,7 @@ def get_unique_calls(call_args_list):
     return uniques
 
 
-def test_install_apply(configured_harness, kind, mocker):
-    apply = mocker.patch('lightkube.Client.apply')
-
+def test_install_apply(configured_harness, kind, mocked_client):
     begin_noop(configured_harness)
 
     actual_objects = []
@@ -92,7 +102,7 @@ def test_install_apply(configured_harness, kind, mocker):
 
     # The install method is invoked multiple times, and the apply method is called for every object in the manifest
     # but we will ignore the duplicated entries in the call list
-    for call in get_unique_calls(apply.call_args_list):
+    for call in get_unique_calls(mocked_client.return_value.apply.call_args_list):
         # Ensure the server side apply calls include the namespace kwarg
         assert call.kwargs['namespace'] == 'None'
         # The first (and only) argument to the apply method is the obj
@@ -103,17 +113,12 @@ def test_install_apply(configured_harness, kind, mocker):
     assert configured_harness.charm.model.unit.status == ActiveStatus('')
 
 
-def test_install_apply_with_load_resource_error(configured_harness, kind, mocker):
-    mocker.patch('lightkube.codecs.load_all_yaml', side_effect=LoadResourceError('mocked error'))
-
+def test_install_apply_with_load_resource_error(configured_harness, kind, mocked_load_all_yaml):
     begin_noop(configured_harness)
-
     assert configured_harness.charm.model.unit.status == BlockedStatus('mocked error')
 
 
-def test_removal(configured_harness, kind, mocker):
-    delete = mocker.patch('lightkube.Client.delete')
-
+def test_removal(configured_harness, kind, mocked_client):
     begin_noop(configured_harness)
 
     configured_harness.charm.on.remove.emit()
@@ -126,7 +131,7 @@ def test_removal(configured_harness, kind, mocker):
         kind_name = {'kind': obj['kind'], 'name': obj['metadata']['name']}
         expected_kind_name_list.append(kind_name)
 
-    for call in delete.call_args_list:
+    for call in mocked_client.return_value.delete.call_args_list:
         # Ensure the server side apply calls include the namespace kwarg ('None' in the example yaml)
         assert call.kwargs['namespace'] == 'None'
         # The first argument is the resource class
@@ -137,12 +142,9 @@ def test_removal(configured_harness, kind, mocker):
     assert expected_kind_name_list == actual_kind_name_list
 
 
-def test_removal_with_load_resource_error(configured_harness, mocker):
-    mocker.patch('lightkube.codecs.load_all_yaml', side_effect=LoadResourceError('mocked error'))
-
+def test_removal_with_load_resource_error(configured_harness, mocked_load_all_yaml):
     begin_noop(configured_harness)
     configured_harness.charm.on.remove.emit()
-
     assert configured_harness.charm.model.unit.status == BlockedStatus('mocked error')
 
 
