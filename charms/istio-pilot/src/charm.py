@@ -10,6 +10,10 @@ from ops.charm import CharmBase, RelationBrokenEvent
 from ops.main import main
 from ops.model import ActiveStatus, BlockedStatus, WaitingStatus
 from serialized_data_interface import NoCompatibleVersions, NoVersionsListed, get_interfaces
+from lightkube import Client, codecs
+from lightkube.core.exceptions import LoadResourceError, ApiError
+from lightkube.generic_resource import create_namespaced_resource
+from lightkube.resources.core_v1 import Service
 
 
 class Operator(CharmBase):
@@ -33,6 +37,39 @@ class Operator(CharmBase):
             self.model.unit.status = ActiveStatus()
 
         self.log = logging.getLogger(__name__)
+
+        # Every lightkube API call will use the model name as the namespace
+        self.lightkube_client = Client(namespace=self.model.name)
+        # Create namespaced resource classes for lightkube client
+        self.envoy_filter_resource = create_namespaced_resource(group="networking.istio.io",
+                                                                version="v1alpha3",
+                                                                kind="EnvoyFilter",
+                                                                plural="envoyfilters",
+                                                                verbs=None)
+
+        self.virtual_service_resource = create_namespaced_resource(group="networking.istio.io",
+                                                                   version="v1alpha3",
+                                                                   kind="VirtualService",
+                                                                   plural="virtualservices",
+                                                                   verbs=None)
+
+        self.destination_rule_resource = create_namespaced_resource(group="networking.istio.io",
+                                                                    version="v1alpha3",
+                                                                    kind="DestinationRule",
+                                                                    plural="destinationrules",
+                                                                    verbs=None)
+
+        self.gateway_resource = create_namespaced_resource(group="networking.istio.io",
+                                                           version="v1beta1",
+                                                           kind="Gateway",
+                                                           plural="gateways",
+                                                           verbs=None)
+
+        self.rbac_config_resource = create_namespaced_resource(group="networking.istio.io",
+                                                               version="v1beta1",
+                                                               kind="Gateway",
+                                                               plural="gateways",
+                                                               verbs=None)
 
         self.env = Environment(loader=FileSystemLoader('src'))
 
@@ -81,38 +118,60 @@ class Operator(CharmBase):
             ]
         )
 
+        # try:
+        #     self._kubectl(
+        #         "delete",
+        #         "virtualservices,destinationrule,gateways,envoyfilters,rbacconfigs",
+        #         f"-lapp.juju.is/created-by={self.app.name}",
+        #         capture_output=True,
+        #     )
+        #     self._kubectl(
+        #         'delete',
+        #         "--ignore-not-found",
+        #         "-f-",
+        #         input=manifests,
+        #         capture_output=True,
+        #     )
+        # except subprocess.CalledProcessError as e:
+        #     if "(Unauthorized)" in e.stderr.decode("utf-8"):
+        #         # Ignore error from https://bugs.launchpad.net/juju/+bug/1941655
+        #         pass
+        #     else:
+        #         self.log.error(e.stderr)
+        #         raise
+
+        # Todo: ignore unauthorized error
+        resources = [self.virtual_service_resource, self.destination_rule_resource, self.gateway_resource,
+                     self.envoy_filter_resource, self.rbac_config_resource]
+        self._delete_resources(resources)
+
         try:
-            self._kubectl(
-                "delete",
-                "virtualservices,destinationrule,gateways,envoyfilters,rbacconfigs",
-                f"-lapp.juju.is/created-by={self.app.name}",
-                capture_output=True,
-            )
-            self._kubectl(
-                'delete',
-                "--ignore-not-found",
-                "-f-",
-                input=manifests,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError as e:
-            if "(Unauthorized)" in e.stderr.decode("utf-8"):
-                # Ignore error from https://bugs.launchpad.net/juju/+bug/1941655
-                pass
-            else:
-                self.log.error(e.stderr)
-                raise
+            for obj in codecs.load_all_yaml(manifests):
+                try:
+                    self.lightkube_client.delete(obj.__class__, obj.metadata.name)
+                except ApiError as err:
+                    if "not found" in str(err):
+                        pass
+                    else:
+                        raise err
+        except LoadResourceError as err:
+            self.model.unit.status = BlockedStatus(str(err))
+            return
 
     def handle_default_gateways(self, event):
         t = self.env.get_template('gateway.yaml.j2')
         gateways = self.model.config['default-gateways'].split(',')
         manifest = ''.join(t.render(name=g) for g in gateways)
-        self._kubectl(
-            'delete',
-            'gateways',
-            f'-lapp.juju.is/created-by={self.app.name}',
-        )
-        self._kubectl("apply", "-f-", input=manifest)
+        # self._kubectl(
+        #     'delete',
+        #     'gateways',
+        #     f'-lapp.juju.is/created-by={self.app.name}',
+        # )
+        # self._kubectl("apply", "-f-", input=manifest)
+
+        resources = [self.gateway_resource]
+        self._delete_resources(resources)
+        self._apply_manifest(manifest)
 
     def send_info(self, event):
         if self.interfaces["istio-pilot"]:
@@ -182,14 +241,16 @@ class Operator(CharmBase):
         ]
         virtual_services = ''.join(vses)
 
-        self._kubectl(
-            'delete',
-            'virtualservices,destinationrules',
-            f'-lapp.juju.is/created-by={self.app.name}',
-        )
+        # self._kubectl(
+        #     'delete',
+        #     'virtualservices,destinationrules',
+        #     f'-lapp.juju.is/created-by={self.app.name}',
+        # )
+        resources = [self.virtual_service_resource, self.destination_rule_resource]
+        self._delete_resources(resources)
         if routes:
-            self._kubectl("apply", "-f-", input=virtual_services)
-
+            # self._kubectl("apply", "-f-", input=virtual_services)
+            self._apply_manifest(virtual_services)
         # Send URL(s) back
         for (rel, app), route in routes.items():
             if int(ingress.versions[app.name][1:]) < 3:
@@ -242,31 +303,16 @@ class Operator(CharmBase):
 
         manifests = [rbac_configs, auth_filters]
         manifests = '\n'.join([m for m in manifests if m])
-        self._kubectl(
-            'delete',
-            'envoyfilters,rbacconfigs',
-            f'-lapp.juju.is/created-by={self.app.name}',
-        )
+        # self._kubectl(
+        #     'delete',
+        #     'envoyfilters,rbacconfigs',
+        #     f'-lapp.juju.is/created-by={self.app.name}',
+        # )
+        resources = [self.envoy_filter_resource, self.rbac_config_resource]
+        self._delete_resources(resources)
 
-        self._kubectl("apply", "-f-", input=manifests)
-
-    def _kubectl(self, *args, namespace=None, input=None, capture_output=False):
-        """Helper for running kubectl."""
-        if isinstance(input, str):
-            input = input.encode("utf-8")
-        res = subprocess.run(
-            [
-                './kubectl',
-                '-n',
-                namespace or self.model.name,
-                *args,
-            ],
-            input=input,
-            capture_output=capture_output,
-            check=True,
-        )
-        if capture_output:
-            return res.stdout.decode("utf-8")
+        # self._kubectl("apply", "-f-", input=manifests)
+        self._apply_manifest(manifests)
 
     def _get_gateway_address(self):
         """Look up the load balancer address for the ingress gateway.
@@ -274,23 +320,29 @@ class Operator(CharmBase):
         If the gateway isn't available or doesn't have a load balancer address yet,
         returns None.
         """
-        svcs = yaml.safe_load(
-            self._kubectl(
-                "get",
-                "svc",
-                "-l",
-                "istio=ingressgateway",
-                "-oyaml",
-                namespace=self.model.name,
-                capture_output=True,
-            )
-        )
-        if not svcs["items"]:
-            return None
-        addrs = svcs["items"][0]["status"].get("loadBalancer", {}).get("ingress", [])
-        if not addrs:
-            return None
-        return addrs[0].get("hostname", addrs[0].get("ip"))
+        services = self.lightkube_client.list(Service, labels={"istio": "ingressgateway"}, namespace="istio-system")
+        for service in services:
+            ingress_points = service.status.loadBalancer.ingress
+            if ingress_points:
+                return ingress_points[0].ip
+        return None
+
+    def _delete_objects_with_labels(self, resource, labels):
+        for obj in self.lightkube_client.list(resource, labels=labels):
+            self.lightkube_client.delete(resource, obj.metadata.name)
+
+    def _delete_resources(self, resources_list):
+        for resource in resources_list:
+            self._delete_objects_with_labels(resource,
+                                             labels={"app.juju.is/created-by": f"{self.app.name}"})
+
+    def _apply_manifest(self, manifest):
+        try:
+            for obj in codecs.load_all_yaml(manifest):
+                self.lightkube_client.apply(obj)
+        except LoadResourceError as err:
+            self.model.unit.status = BlockedStatus(str(err))
+            return
 
 
 if __name__ == "__main__":
