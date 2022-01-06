@@ -1,10 +1,39 @@
 from unittest.mock import call as Call
 
+import lightkube
 import pytest
 import yaml
 from charm import Operator
 from ops.model import ActiveStatus, WaitingStatus
 from ops.testing import Harness
+
+
+# Autouse to prevent calling out to the k8s API via lightkube
+@pytest.fixture(autouse=True)
+def mocked_client(mocker):
+    client = mocker.patch("charm.Client")
+    yield client
+
+
+@pytest.fixture()
+def mocked_list(mocked_client, mocker):
+    # When looking up services, list needs to return a subscriptable (MagicMock mocks are subscriptable) object
+    # that has an IP attribute equal to 127.0.0.1
+    mocked_ingress = mocker.MagicMock()
+    mocked_ingress.ip = "127.0.0.1"
+    mocked_service_obj = mocker.MagicMock()
+    mocked_service_obj.status.loadBalancer.ingress.__getitem__.return_value = mocked_ingress
+    # Otherwise, list needs to return a list of at least one object so that delete gets called
+    mocked_resource_obj = mocker.Mock()
+
+    def my_side_effect(*args, **kwargs):
+        if args[0].__name__ == "Service":
+            return [mocked_service_obj]
+        else:
+            # List needs to return a list of at least one object so that delete gets called
+            return [mocked_resource_obj]
+
+    mocked_client.return_value.list.side_effect = my_side_effect
 
 
 # autouse to ensure we don't accidentally call out, but
@@ -70,8 +99,18 @@ def test_default_gateways(harness, subprocess):
     },
 
 
-def test_with_ingress_relation(harness, subprocess):
-    run = subprocess.run
+def get_unique_calls(call_args_list):
+    uniques = []
+    for call in call_args_list:
+        if call in uniques:
+            continue
+        else:
+            uniques.append(call)
+
+    return uniques
+
+
+def test_with_ingress_relation(harness, subprocess, mocked_client, mocked_list):
     check_call = subprocess.check_call
 
     harness.set_leader(True)
@@ -93,18 +132,11 @@ def test_with_ingress_relation(harness, subprocess):
         {"_supported_versions": "- v1", "data": yaml.dump(data)},
     )
 
-    run.return_value.stdout = b"{'items': []}"
     harness.begin_with_initial_hooks()
 
-    assert run.call_count == 4
-    run.reset_mock()
-    run.return_value.stdout = yaml.safe_dump(
-        {"items": [{"status": {"loadBalancer": {"ingress": [{"ip": "127.0.0.1"}]}}}]}
-    ).encode("utf-8")
     harness.framework.reemit()
 
-    expected = [
-        {
+    expected = {
             'apiVersion': 'networking.istio.io/v1alpha3',
             'kind': 'VirtualService',
             'metadata': {'name': 'service-name'},
@@ -127,8 +159,7 @@ def test_with_ingress_relation(harness, subprocess):
                     }
                 ],
             },
-        },
-    ]
+        }
 
     assert check_call.call_args_list == [
         Call(
@@ -144,30 +175,20 @@ def test_with_ingress_relation(harness, subprocess):
         )
     ]
 
-    assert len(run.call_args_list) == 6
+    delete_calls = get_unique_calls(mocked_client.return_value.delete.call_args_list)
+    deleted_resource_types = []
+    # Skip the first unique delete call since that is the call for the gateway
+    for call in delete_calls[1:]:
+        resource_type = call[0][0]
+        deleted_resource_types.append(resource_type.__name__)
+    assert deleted_resource_types == ['VirtualService', 'DestinationRule']
 
-    for call in run.call_args_list[1::3]:
-        args = [
-            './kubectl',
-            '-n',
-            None,
-            'delete',
-            'virtualservices,destinationrules',
-            '-lapp.juju.is/created-by=istio-pilot',
-        ]
-        assert call.args == (args,)
-
-    for call in run.call_args_list[2::3]:
-        expected_input = list(yaml.safe_load_all(call.kwargs['input']))
-        assert call.args == (['./kubectl', '-n', None, 'apply', '-f-'],)
-        assert expected_input == expected
-
-    assert isinstance(harness.charm.model.unit.status, ActiveStatus)
+    # Skip the first unique apply call since that is the call for the gateway
+    apply_calls = get_unique_calls(mocked_client.return_value.apply.call_args_list[1:])
+    assert apply_calls[0][0][0] == expected
 
 
-def test_with_ingress_relation_v3(harness, subprocess):
-    run = subprocess.run
-
+def test_with_ingress_relation_v3(harness, subprocess, mocked_client, mocked_list):
     harness.set_leader(True)
     harness.add_oci_resource(
         "noop",
@@ -212,9 +233,6 @@ def test_with_ingress_relation_v3(harness, subprocess):
         {"_supported_versions": "- v3", "data": yaml.dump(data2)},
     )
 
-    run.return_value.stdout = yaml.safe_dump(
-        {"items": [{"status": {"loadBalancer": {"ingress": [{"ip": "127.0.0.1"}]}}}]}
-    ).encode("utf-8")
     try:
         harness.begin_with_initial_hooks()
     except KeyError as e:
@@ -313,9 +331,12 @@ def test_with_ingress_relation_v3(harness, subprocess):
         },
     ]
 
-    call = run.call_args_list[-1]
-    actual_input = list(yaml.safe_load_all(call.kwargs['input']))
-    assert actual_input == expected_input
+    apply_calls = get_unique_calls(mocked_client.return_value.apply.call_args_list)
+    apply_args = []
+    # Skip the first unique call since that is the call for the gateway
+    for call in apply_calls[1:]:
+        apply_args.append(call[0][0])
+    assert apply_args == expected_input
 
     sent_data = harness.get_relation_data(rel_id, harness.charm.app.name)
     assert "data" in sent_data
@@ -329,8 +350,7 @@ def test_with_ingress_relation_v3(harness, subprocess):
     }
 
 
-def test_with_ingress_auth_relation(harness, subprocess):
-    run = subprocess.run
+def test_with_ingress_auth_relation(harness, subprocess, mocked_client, mocked_list):
     check_call = subprocess.check_call
 
     harness.set_leader(True)
@@ -413,22 +433,19 @@ def test_with_ingress_auth_relation(harness, subprocess):
         )
     ]
 
-    assert run.call_count == 6
+    delete_calls = get_unique_calls(mocked_client.return_value.delete.call_args_list)
+    deleted_resource_types = []
+    # Skip the first unique call since that is the call for the gateway
+    for call in delete_calls[1:]:
+        resource_type = call[0][0]
+        deleted_resource_types.append(resource_type.__name__)
+    assert deleted_resource_types == ['EnvoyFilter', 'RbacConfig']
 
-    for call in run.call_args_list[2::2]:
-        args = [
-            './kubectl',
-            '-n',
-            None,
-            'delete',
-            'envoyfilters,rbacconfigs',
-            '-lapp.juju.is/created-by=istio-pilot',
-        ]
-        assert call.args == (args,)
-
-    for call in run.call_args_list[5::2]:
-        expected_input = list(yaml.safe_load_all(call.kwargs['input']))
-        assert call.args == (['./kubectl', '-n', None, 'apply', '-f-'],)
-        assert expected_input == expected
+    apply_calls = get_unique_calls(mocked_client.return_value.apply.call_args_list)
+    apply_args = []
+    # Skip the first unique call since that is the call for the gateway
+    for call in apply_calls[1:]:
+        apply_args.append(call[0][0])
+    assert apply_args == expected
 
     assert isinstance(harness.charm.model.unit.status, ActiveStatus)

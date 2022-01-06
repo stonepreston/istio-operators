@@ -146,6 +146,3 @@ def test_removal_with_load_resource_error(configured_harness, mocked_load_all_ya
     begin_noop(configured_harness)
     configured_harness.charm.on.remove.emit()
     assert configured_harness.charm.model.unit.status == BlockedStatus('mocked error')
-
-
-

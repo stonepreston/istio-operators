@@ -39,7 +39,7 @@ class Operator(CharmBase):
         self.log = logging.getLogger(__name__)
 
         # Every lightkube API call will use the model name as the namespace
-        self.lightkube_client = Client(namespace=self.model.name)
+        self.lightkube_client = Client(namespace=self.model.name, field_manager="lightkube")
         # Create namespaced resource classes for lightkube client
         self.envoy_filter_resource = create_namespaced_resource(group="networking.istio.io",
                                                                 version="v1alpha3",
@@ -65,10 +65,10 @@ class Operator(CharmBase):
                                                            plural="gateways",
                                                            verbs=None)
 
-        self.rbac_config_resource = create_namespaced_resource(group="networking.istio.io",
-                                                               version="v1beta1",
-                                                               kind="Gateway",
-                                                               plural="gateways",
+        self.rbac_config_resource = create_namespaced_resource(group="rbac.istio.io",
+                                                               version="v1alpha1",
+                                                               kind="RbacConfig",
+                                                               plural="rbacconfigs",
                                                                verbs=None)
 
         self.env = Environment(loader=FileSystemLoader('src'))
@@ -118,29 +118,8 @@ class Operator(CharmBase):
             ]
         )
 
-        # try:
-        #     self._kubectl(
-        #         "delete",
-        #         "virtualservices,destinationrule,gateways,envoyfilters,rbacconfigs",
-        #         f"-lapp.juju.is/created-by={self.app.name}",
-        #         capture_output=True,
-        #     )
-        #     self._kubectl(
-        #         'delete',
-        #         "--ignore-not-found",
-        #         "-f-",
-        #         input=manifests,
-        #         capture_output=True,
-        #     )
-        # except subprocess.CalledProcessError as e:
-        #     if "(Unauthorized)" in e.stderr.decode("utf-8"):
-        #         # Ignore error from https://bugs.launchpad.net/juju/+bug/1941655
-        #         pass
-        #     else:
-        #         self.log.error(e.stderr)
-        #         raise
-
         # Todo: ignore unauthorized error
+        # Todo: Add tests for these delete calls
         resources = [self.virtual_service_resource, self.destination_rule_resource, self.gateway_resource,
                      self.envoy_filter_resource, self.rbac_config_resource]
         self._delete_resources(resources)
@@ -162,12 +141,6 @@ class Operator(CharmBase):
         t = self.env.get_template('gateway.yaml.j2')
         gateways = self.model.config['default-gateways'].split(',')
         manifest = ''.join(t.render(name=g) for g in gateways)
-        # self._kubectl(
-        #     'delete',
-        #     'gateways',
-        #     f'-lapp.juju.is/created-by={self.app.name}',
-        # )
-        # self._kubectl("apply", "-f-", input=manifest)
 
         resources = [self.gateway_resource]
         self._delete_resources(resources)
@@ -241,16 +214,12 @@ class Operator(CharmBase):
         ]
         virtual_services = ''.join(vses)
 
-        # self._kubectl(
-        #     'delete',
-        #     'virtualservices,destinationrules',
-        #     f'-lapp.juju.is/created-by={self.app.name}',
-        # )
         resources = [self.virtual_service_resource, self.destination_rule_resource]
         self._delete_resources(resources)
+
         if routes:
-            # self._kubectl("apply", "-f-", input=virtual_services)
             self._apply_manifest(virtual_services)
+
         # Send URL(s) back
         for (rel, app), route in routes.items():
             if int(ingress.versions[app.name][1:]) < 3:
@@ -303,15 +272,9 @@ class Operator(CharmBase):
 
         manifests = [rbac_configs, auth_filters]
         manifests = '\n'.join([m for m in manifests if m])
-        # self._kubectl(
-        #     'delete',
-        #     'envoyfilters,rbacconfigs',
-        #     f'-lapp.juju.is/created-by={self.app.name}',
-        # )
+
         resources = [self.envoy_filter_resource, self.rbac_config_resource]
         self._delete_resources(resources)
-
-        # self._kubectl("apply", "-f-", input=manifests)
         self._apply_manifest(manifests)
 
     def _get_gateway_address(self):
