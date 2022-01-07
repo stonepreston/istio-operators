@@ -38,7 +38,7 @@ class Operator(CharmBase):
 
         self.log = logging.getLogger(__name__)
 
-        # Every lightkube API call will use the model name as the namespace
+        # Every lightkube API call will use the model name as the namespace by default
         self.lightkube_client = Client(namespace=self.model.name, field_manager="lightkube")
         # Create namespaced resource classes for lightkube client
         self.envoy_filter_resource = create_namespaced_resource(group="networking.istio.io",
@@ -118,32 +118,28 @@ class Operator(CharmBase):
             ]
         )
 
-        # Todo: ignore unauthorized error
-        # Todo: Add tests for these delete calls
-        resources = [self.virtual_service_resource, self.destination_rule_resource, self.gateway_resource,
-                     self.envoy_filter_resource, self.rbac_config_resource]
-        self._delete_resources(resources)
-
+        # Todo: Test if unauthorized stuff is even needed with light kube
         try:
-            for obj in codecs.load_all_yaml(manifests):
-                try:
-                    self.lightkube_client.delete(obj.__class__, obj.metadata.name)
-                except ApiError as err:
-                    if "not found" in str(err):
-                        pass
-                    else:
-                        raise err
-        except LoadResourceError as err:
-            self.model.unit.status = BlockedStatus(str(err))
-            return
+            resources = [self.virtual_service_resource, self.destination_rule_resource, self.gateway_resource,
+                         self.envoy_filter_resource, self.rbac_config_resource]
+            for resource in resources:
+                self._delete_resource(resource)
+
+            self._delete_manifest(manifests, ignore_not_found=True)
+        except ApiError as err:
+            if "(Unauthorized)" in err.status.message:
+                # Ignore error from https://bugs.launchpad.net/juju/+bug/1941655
+                pass
+            else:
+                self.log.error(str(err))
+                raise
 
     def handle_default_gateways(self, event):
         t = self.env.get_template('gateway.yaml.j2')
         gateways = self.model.config['default-gateways'].split(',')
         manifest = ''.join(t.render(name=g) for g in gateways)
 
-        resources = [self.gateway_resource]
-        self._delete_resources(resources)
+        self._delete_resource(self.gateway_resource)
         self._apply_manifest(manifest)
 
     def send_info(self, event):
@@ -215,7 +211,8 @@ class Operator(CharmBase):
         virtual_services = ''.join(vses)
 
         resources = [self.virtual_service_resource, self.destination_rule_resource]
-        self._delete_resources(resources)
+        for resource in resources:
+            self._delete_resource(resource)
 
         if routes:
             self._apply_manifest(virtual_services)
@@ -274,7 +271,9 @@ class Operator(CharmBase):
         manifests = '\n'.join([m for m in manifests if m])
 
         resources = [self.envoy_filter_resource, self.rbac_config_resource]
-        self._delete_resources(resources)
+        for resource in resources:
+            self._delete_resource(resource)
+
         self._apply_manifest(manifests)
 
     def _get_gateway_address(self):
@@ -283,29 +282,46 @@ class Operator(CharmBase):
         If the gateway isn't available or doesn't have a load balancer address yet,
         returns None.
         """
-        services = self.lightkube_client.list(Service, labels={"istio": "ingressgateway"}, namespace="istio-system")
+        services = self.lightkube_client.list(Service, labels={"istio": "ingressgateway"}, namespace=self.model.name)
         for service in services:
             ingress_points = service.status.loadBalancer.ingress
             if ingress_points:
                 return ingress_points[0].ip
         return None
 
-    def _delete_objects_with_labels(self, resource, labels):
-        for obj in self.lightkube_client.list(resource, labels=labels):
-            self.lightkube_client.delete(resource, obj.metadata.name)
+    # Todo: Add tests for exceptions
+    def _delete_resource(self, resource):
+        for obj in self.lightkube_client.list(resource, labels={"app.juju.is/created-by": f"{self.app.name}"}):
+            try:
+                self.lightkube_client.delete(resource, obj.metadata.name)
+            except ApiError as err:
+                self.log.error(err.status.message)
+                raise
 
-    def _delete_resources(self, resources_list):
-        for resource in resources_list:
-            self._delete_objects_with_labels(resource,
-                                             labels={"app.juju.is/created-by": f"{self.app.name}"})
-
+    # Todo: Add tests for exceptions
     def _apply_manifest(self, manifest):
         try:
             for obj in codecs.load_all_yaml(manifest):
                 self.lightkube_client.apply(obj)
         except LoadResourceError as err:
-            self.model.unit.status = BlockedStatus(str(err))
-            return
+            self.log.error(f"Error encountered while attempting to create Lightkube resources from YAML. {str(err)}")
+            raise
+
+    # Todo: Add tests for exceptions
+    def _delete_manifest(self, manifest, ignore_not_found=False):
+        try:
+            for obj in codecs.load_all_yaml(manifest):
+                try:
+                    self.lightkube_client.delete(obj.__class__, obj.metadata.name)
+                except ApiError as err:
+                    if "not found" in err.status.message and ignore_not_found:
+                        pass
+                    else:
+                        self.log.error(err.status.message)
+                        raise
+        except LoadResourceError as err:
+            self.log.error(f"Error encountered while attempting to create Lightkube resources from YAML. {str(err)}")
+            raise
 
 
 if __name__ == "__main__":

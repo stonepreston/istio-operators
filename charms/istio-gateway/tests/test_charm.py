@@ -132,7 +132,7 @@ def test_removal(configured_harness, kind, mocked_client):
         expected_kind_name_list.append(kind_name)
 
     for call in mocked_client.return_value.delete.call_args_list:
-        # Ensure the server side apply calls include the namespace kwarg ('None' in the example yaml)
+        # Ensure the delete calls include the namespace kwarg ('None' in the example yaml)
         assert call.kwargs['namespace'] == 'None'
         # The first argument is the resource class
         # The second argument is the object name
