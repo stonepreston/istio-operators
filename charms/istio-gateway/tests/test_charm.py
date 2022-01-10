@@ -3,7 +3,14 @@ import yaml
 from charm import Operator
 from ops.model import ActiveStatus, BlockedStatus, WaitingStatus
 from ops.testing import Harness
-from lightkube.core.exceptions import LoadResourceError
+from lightkube.core.exceptions import LoadResourceError, ApiError
+
+
+def begin_noop(harness):
+    # Most of the tests use these lines to kick things off
+    harness.begin_with_initial_hooks()
+    container = harness.model.unit.get_container('noop')
+    harness.charm.on['noop'].pebble_ready.emit(container)
 
 
 # Autouse to prevent calling out to the k8s API via lightkube
@@ -46,6 +53,8 @@ def configured_harness(harness, kind):
         {"_supported_versions": "- v1", "data": yaml.dump(data)},
     )
 
+    begin_noop(harness)
+
     return harness
 
 
@@ -53,13 +62,6 @@ def configured_harness(harness, kind):
 def mocked_load_all_yaml(mocker):
     load_all_yaml = mocker.patch('charm.codecs.load_all_yaml', side_effect=LoadResourceError('mocked error'))
     yield load_all_yaml
-
-
-def begin_noop(harness):
-    # Most of the tests use these lines to kick things off
-    harness.begin_with_initial_hooks()
-    container = harness.model.unit.get_container('noop')
-    harness.charm.on['noop'].pebble_ready.emit(container)
 
 
 def test_not_leader(harness):
@@ -95,8 +97,6 @@ def get_unique_calls(call_args_list):
 
 
 def test_install_apply(configured_harness, kind, mocked_client):
-    begin_noop(configured_harness)
-
     actual_objects = []
     expected_objects = list(yaml.safe_load_all(open(f'tests/{kind}-example.yaml')))
 
@@ -113,14 +113,14 @@ def test_install_apply(configured_harness, kind, mocked_client):
     assert configured_harness.charm.model.unit.status == ActiveStatus('')
 
 
-def test_install_apply_with_load_resource_error(configured_harness, kind, mocked_load_all_yaml):
-    begin_noop(configured_harness)
-    assert configured_harness.charm.model.unit.status == BlockedStatus('mocked error')
+def test_install_apply_with_load_resource_error(configured_harness, kind, mocker):
+    mocker.patch('charm.codecs.load_all_yaml', side_effect=LoadResourceError('mocked error'))
+    # Ensure we raise the exception
+    with pytest.raises(LoadResourceError):
+        configured_harness.charm.on.remove.emit()
 
 
-def test_removal(configured_harness, kind, mocked_client):
-    begin_noop(configured_harness)
-
+def test_removal(configured_harness, kind, mocked_client, mocker):
     configured_harness.charm.on.remove.emit()
 
     # Ensure the objects that get deleted are the objects defined in the example yaml files
@@ -142,7 +142,16 @@ def test_removal(configured_harness, kind, mocked_client):
     assert expected_kind_name_list == actual_kind_name_list
 
 
-def test_removal_with_load_resource_error(configured_harness, mocked_load_all_yaml):
-    begin_noop(configured_harness)
+def test_removal_with_load_resource_error(configured_harness, mocker):
+    mocker.patch('charm.codecs.load_all_yaml', side_effect=LoadResourceError('mocked error'))
+    # Ensure we raise the exception
+    with pytest.raises(LoadResourceError):
+        configured_harness.charm.on.remove.emit()
+
+
+def test_removal_with_unauthorized_error(configured_harness, mocked_client, mocker):
+    api_error = ApiError(response=mocker.MagicMock())
+    api_error.status.message = "(Unauthorized)"
+    mocked_client.return_value.delete.side_effect = api_error
+    # Ensure we DO NOT raise the exception
     configured_harness.charm.on.remove.emit()
-    assert configured_harness.charm.model.unit.status == BlockedStatus('mocked error')

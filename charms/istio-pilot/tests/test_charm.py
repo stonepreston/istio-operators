@@ -16,7 +16,7 @@ def mocked_client(mocker):
     yield client
 
 
-@pytest.fixture()
+@pytest.fixture(autouse=True)
 def mocked_list(mocked_client, mocker):
     # When looking up services, list needs to return a subscriptable (MagicMock mocks are subscriptable) object
     # that has an IP attribute equal to 127.0.0.1
@@ -32,7 +32,12 @@ def mocked_list(mocked_client, mocker):
         if args[0].__name__ == "Service":
             return [mocked_service_obj]
         else:
-            # List needs to return a list of at least one object so that delete gets called
+            # List needs to return a list of at least one object of the passed in resource type
+            # so that delete gets called
+            # Lightkube uses the objects class name (which should be the resource kind) to delete objects
+            # We need the list objects' class names to match the resource that was passed in to
+            # the list method
+            mocked_resource_obj.__class__ = args[0].__name__
             return [mocked_resource_obj]
 
     mocked_client.return_value.list.side_effect = my_side_effect
@@ -56,23 +61,6 @@ def subprocess(mocker):
 @pytest.fixture
 def harness():
     return Harness(Operator)
-
-
-@pytest.fixture
-def removal_harness(harness, mocker):
-    mocker.patch('charm.codecs.load_all_yaml', return_value=[mocker.Mock(), mocker.Mock()])
-    harness.set_leader(True)
-    harness.add_oci_resource(
-        "noop",
-        {
-            "registrypath": "",
-            "username": "",
-            "password": "",
-        },
-    )
-
-    harness.begin_with_initial_hooks()
-    return harness
 
 
 def test_not_leader(harness):
@@ -129,7 +117,15 @@ def get_unique_calls(call_args_list):
     return uniques
 
 
-def test_with_ingress_relation(harness, subprocess, mocked_client, mocked_list):
+def get_deleted_resource_types(delete_calls):
+    deleted_resource_types = []
+    for call in delete_calls:
+        resource_type = call[0][0]
+        deleted_resource_types.append(resource_type)
+    return deleted_resource_types
+
+
+def test_with_ingress_relation(harness, subprocess, mocked_client):
     check_call = subprocess.check_call
 
     harness.set_leader(True)
@@ -195,19 +191,14 @@ def test_with_ingress_relation(harness, subprocess, mocked_client, mocked_list):
     ]
 
     delete_calls = get_unique_calls(mocked_client.return_value.delete.call_args_list)
-    deleted_resource_types = []
-    # Skip the first unique delete call since that is the call for the gateway
-    for call in delete_calls[1:]:
-        resource_type = call[0][0]
-        deleted_resource_types.append(resource_type.__name__)
-    assert deleted_resource_types == ['VirtualService', 'DestinationRule']
+    assert get_deleted_resource_types(delete_calls[1:]) == ['VirtualService', 'DestinationRule']
 
     # Skip the first unique apply call since that is the call for the gateway
     apply_calls = get_unique_calls(mocked_client.return_value.apply.call_args_list[1:])
     assert apply_calls[0][0][0] == expected
 
 
-def test_with_ingress_relation_v3(harness, subprocess, mocked_client, mocked_list):
+def test_with_ingress_relation_v3(harness, subprocess, mocked_client):
     harness.set_leader(True)
     harness.add_oci_resource(
         "noop",
@@ -369,7 +360,7 @@ def test_with_ingress_relation_v3(harness, subprocess, mocked_client, mocked_lis
     }
 
 
-def test_with_ingress_auth_relation(harness, subprocess, mocked_client, mocked_list):
+def test_with_ingress_auth_relation(harness, subprocess, mocked_client):
     check_call = subprocess.check_call
 
     harness.set_leader(True)
@@ -453,12 +444,7 @@ def test_with_ingress_auth_relation(harness, subprocess, mocked_client, mocked_l
     ]
 
     delete_calls = get_unique_calls(mocked_client.return_value.delete.call_args_list)
-    deleted_resource_types = []
-    # Skip the first unique call since that is the call for the gateway
-    for call in delete_calls[1:]:
-        resource_type = call[0][0]
-        deleted_resource_types.append(resource_type.__name__)
-    assert deleted_resource_types == ['EnvoyFilter', 'RbacConfig']
+    assert get_deleted_resource_types(delete_calls[1:]) == ['EnvoyFilter', 'RbacConfig']
 
     apply_calls = get_unique_calls(mocked_client.return_value.apply.call_args_list)
     apply_args = []
@@ -470,13 +456,28 @@ def test_with_ingress_auth_relation(harness, subprocess, mocked_client, mocked_l
     assert isinstance(harness.charm.model.unit.status, ActiveStatus)
 
 
-def test_removal(removal_harness, subprocess, mocked_client, mocked_list, mocker):
+def test_removal(harness, subprocess, mocked_client, mocker):
     check_output = subprocess.check_output
+
+    mocked_yaml_object = mocker.Mock()
+    mocked_yaml_object.__class__ = "ResourceObjectFromYaml"
+    mocker.patch('charm.codecs.load_all_yaml', return_value=[mocked_yaml_object, mocked_yaml_object])
+    harness.set_leader(True)
+    harness.add_oci_resource(
+        "noop",
+        {
+            "registrypath": "",
+            "username": "",
+            "password": "",
+        },
+    )
+
+    harness.begin_with_initial_hooks()
 
     # Reset the mock so that the calls list does not include calls from handle_default_gateway that was called
     # with the config changed event
     mocked_client.reset_mock()
-    removal_harness.charm.on.remove.emit()
+    harness.charm.on.remove.emit()
 
     expected_args = [
                 "./istioctl",
@@ -493,49 +494,39 @@ def test_removal(removal_harness, subprocess, mocked_client, mocked_list, mocker
     assert check_output.call_args_list[0].kwargs == {}
 
     delete_calls = mocked_client.return_value.delete.call_args_list
-    deleted_resource_types = []
-    for call in delete_calls:
-        resource_type = call[0][0]
-        deleted_resource_types.append(resource_type.__name__)
     # The 2 mock objects at the end are the "resources" that get returned from the mocked load_all_yaml call when
     # loading the resources from the manifest.
-    assert deleted_resource_types == ['VirtualService', 'DestinationRule', 'Gateway', 'EnvoyFilter', 'RbacConfig',
-                                      'Mock', 'Mock']
-
-
-def test_removal_with_yaml_load_error(removal_harness, subprocess, mocked_client, mocked_list, mocker):
-    mocker.patch('charm.codecs.load_all_yaml', side_effect=LoadResourceError('mocked error'))
-    # Ensure we raise the exception
-    with pytest.raises(LoadResourceError):
-        removal_harness.charm.on.remove.emit()
-
-
-def test_removal_with_api_error(removal_harness, subprocess, mocked_client, mocked_list, mocker):
+    assert get_deleted_resource_types(delete_calls) == ['VirtualService', 'DestinationRule', 'Gateway', 'EnvoyFilter',
+                                                        'RbacConfig', 'ResourceObjectFromYaml',
+                                                        'ResourceObjectFromYaml']
+    # Now test the exceptions that should be ignored
+    # ApiError
     api_error = ApiError(response=mocker.MagicMock())
-    api_error.status.message = "some API error"
-    mocked_client.return_value.delete.side_effect = api_error
-    # mock out the _delete_resource method since we dont want the ApiError to be thrown there
-    mocker.patch('charm.Operator._delete_resource')
-    # Ensure we raise the exception
-    with pytest.raises(ApiError):
-        removal_harness.charm.on.remove.emit()
-
-
-def test_removal_with_not_found_error(removal_harness, subprocess, mocked_client, mocked_list, mocker):
-    api_error = ApiError(response=mocker.MagicMock())
+    # # ApiError with not found message should be ignored
     api_error.status.message = "something not found"
     mocked_client.return_value.delete.side_effect = api_error
-    # mock out the _delete_resource method since we dont want the ApiError to be thrown there
-    mocker.patch('charm.Operator._delete_resource')
+    # mock out the _delete_existing_resource_objects method since we dont want the ApiError to be thrown there
+    mocker.patch('charm.Operator._delete_existing_resource_objects')
     # Ensure we DO NOT raise the exception
-    removal_harness.charm.on.remove.emit()
+    harness.charm.on.remove.emit()
 
-
-def test_removal_with_unauthorized_error(removal_harness, subprocess, mocked_client, mocked_list, mocker):
-    api_error = ApiError(response=mocker.MagicMock())
+    # ApiError with unauthorized message should be ignored
     api_error.status.message = "(Unauthorized)"
     mocked_client.return_value.delete.side_effect = api_error
     # Ensure we DO NOT raise the exception
-    removal_harness.charm.on.remove.emit()
+    harness.charm.on.remove.emit()
 
+
+def test_handle_default_gateways(harness, mocked_client, mocker):
+    harness.set_leader(True)
+    harness.begin_with_initial_hooks()
+    container = harness.model.unit.get_container('noop')
+    harness.charm.on['noop'].pebble_ready.emit(container)
+
+    # Reset the mock to clear any calls via config changed that happened due to the above harness setup.
+    mocked_client.reset_mock()
+
+    harness.charm.on.config_changed.emit()
+    delete_calls = mocked_client.return_value.delete.call_args_list
+    assert get_deleted_resource_types(delete_calls) == ['Gateway']
 

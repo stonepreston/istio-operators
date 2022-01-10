@@ -118,28 +118,19 @@ class Operator(CharmBase):
             ]
         )
 
-        # Todo: Test if unauthorized stuff is even needed with light kube
-        try:
-            resources = [self.virtual_service_resource, self.destination_rule_resource, self.gateway_resource,
-                         self.envoy_filter_resource, self.rbac_config_resource]
-            for resource in resources:
-                self._delete_resource(resource)
+        resources = [self.virtual_service_resource, self.destination_rule_resource, self.gateway_resource,
+                     self.envoy_filter_resource, self.rbac_config_resource]
+        for resource in resources:
+            self._delete_existing_resource_objects(resource, ignore_unauthorized=True)
 
-            self._delete_manifest(manifests, ignore_not_found=True)
-        except ApiError as err:
-            if "(Unauthorized)" in err.status.message:
-                # Ignore error from https://bugs.launchpad.net/juju/+bug/1941655
-                pass
-            else:
-                self.log.error(str(err))
-                raise
+        self._delete_manifest(manifests, ignore_not_found=True, ignore_unauthorized=True)
 
     def handle_default_gateways(self, event):
         t = self.env.get_template('gateway.yaml.j2')
         gateways = self.model.config['default-gateways'].split(',')
         manifest = ''.join(t.render(name=g) for g in gateways)
 
-        self._delete_resource(self.gateway_resource)
+        self._delete_existing_resource_objects(self.gateway_resource)
         self._apply_manifest(manifest)
 
     def send_info(self, event):
@@ -212,8 +203,7 @@ class Operator(CharmBase):
 
         resources = [self.virtual_service_resource, self.destination_rule_resource]
         for resource in resources:
-            self._delete_resource(resource)
-
+            self._delete_existing_resource_objects(resource)
         if routes:
             self._apply_manifest(virtual_services)
 
@@ -269,11 +259,9 @@ class Operator(CharmBase):
 
         manifests = [rbac_configs, auth_filters]
         manifests = '\n'.join([m for m in manifests if m])
-
         resources = [self.envoy_filter_resource, self.rbac_config_resource]
         for resource in resources:
-            self._delete_resource(resource)
-
+            self._delete_existing_resource_objects(resource)
         self._apply_manifest(manifests)
 
     def _get_gateway_address(self):
@@ -283,45 +271,37 @@ class Operator(CharmBase):
         returns None.
         """
         services = self.lightkube_client.list(Service, labels={"istio": "ingressgateway"}, namespace=self.model.name)
+
         for service in services:
             ingress_points = service.status.loadBalancer.ingress
             if ingress_points:
                 return ingress_points[0].ip
         return None
 
-    # Todo: Add tests for exceptions
-    def _delete_resource(self, resource):
-        for obj in self.lightkube_client.list(resource, labels={"app.juju.is/created-by": f"{self.app.name}"}):
-            try:
-                self.lightkube_client.delete(resource, obj.metadata.name)
-            except ApiError as err:
-                self.log.error(err.status.message)
+    def _delete_object(self, obj, ignore_not_found=False, ignore_unauthorized=False):
+        try:
+            self.lightkube_client.delete(obj.__class__, obj.metadata.name)
+        except ApiError as err:
+            if "not found" in err.status.message and ignore_not_found:
+                pass
+            elif "(Unauthorized)" in err.status.message and ignore_unauthorized:
+                # Todo: Test if unauthorized stuff is even needed with light kube
+                pass
+            else:
+                self.log.error(f"ApiError encountered when attempting to delete resource. {err.status.message}")
                 raise
 
-    # Todo: Add tests for exceptions
-    def _apply_manifest(self, manifest):
-        try:
-            for obj in codecs.load_all_yaml(manifest):
-                self.lightkube_client.apply(obj)
-        except LoadResourceError as err:
-            self.log.error(f"Error encountered while attempting to create Lightkube resources from YAML. {str(err)}")
-            raise
+    def _delete_existing_resource_objects(self, resource, ignore_not_found=False, ignore_unauthorized=False):
+        for obj in self.lightkube_client.list(resource, labels={"app.juju.is/created-by": f"{self.app.name}"}):
+            self._delete_object(obj, ignore_not_found=ignore_not_found, ignore_unauthorized=ignore_unauthorized)
 
-    # Todo: Add tests for exceptions
-    def _delete_manifest(self, manifest, ignore_not_found=False):
-        try:
-            for obj in codecs.load_all_yaml(manifest):
-                try:
-                    self.lightkube_client.delete(obj.__class__, obj.metadata.name)
-                except ApiError as err:
-                    if "not found" in err.status.message and ignore_not_found:
-                        pass
-                    else:
-                        self.log.error(err.status.message)
-                        raise
-        except LoadResourceError as err:
-            self.log.error(f"Error encountered while attempting to create Lightkube resources from YAML. {str(err)}")
-            raise
+    def _apply_manifest(self, manifest):
+        for obj in codecs.load_all_yaml(manifest):
+            self.lightkube_client.apply(obj)
+
+    def _delete_manifest(self, manifest, ignore_not_found=False, ignore_unauthorized=False):
+        for obj in codecs.load_all_yaml(manifest):
+            self._delete_object(obj, ignore_not_found=ignore_not_found, ignore_unauthorized=ignore_unauthorized)
 
 
 if __name__ == "__main__":
