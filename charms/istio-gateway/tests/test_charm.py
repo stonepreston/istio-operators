@@ -6,64 +6,6 @@ from ops.testing import Harness
 from lightkube.core.exceptions import LoadResourceError, ApiError
 
 
-def begin_noop(harness):
-    # Most of the tests use these lines to kick things off
-    harness.begin_with_initial_hooks()
-    container = harness.model.unit.get_container('noop')
-    harness.charm.on['noop'].pebble_ready.emit(container)
-
-
-# Autouse to prevent calling out to the k8s API via lightkube
-@pytest.fixture(autouse=True)
-def mocked_client(mocker):
-    client = mocker.patch("charm.Client")
-    yield client
-
-
-@pytest.fixture
-def harness():
-    return Harness(Operator)
-
-
-@pytest.fixture(params=["ingress", "egress"])
-def kind(request):
-    return request.param
-
-
-@pytest.fixture()
-def configured_harness(harness, kind):
-    harness.set_leader(True)
-
-    harness.update_config({'kind': kind})
-    harness.add_oci_resource(
-        "noop",
-        {
-            "registrypath": "",
-            "username": "",
-            "password": "",
-        },
-    )
-    rel_id = harness.add_relation("istio-pilot", "app")
-
-    harness.add_relation_unit(rel_id, "app/0")
-    data = {"service-name": "service-name", "service-port": '6666'}
-    harness.update_relation_data(
-        rel_id,
-        "app",
-        {"_supported_versions": "- v1", "data": yaml.dump(data)},
-    )
-
-    begin_noop(harness)
-
-    return harness
-
-
-@pytest.fixture()
-def mocked_load_all_yaml(mocker):
-    load_all_yaml = mocker.patch('charm.codecs.load_all_yaml', side_effect=LoadResourceError('mocked error'))
-    yield load_all_yaml
-
-
 def test_not_leader(harness):
     harness.begin()
     assert harness.charm.model.unit.status == WaitingStatus('Waiting for leadership')
@@ -75,7 +17,7 @@ def test_no_kind(harness):
     assert harness.charm.model.unit.status == BlockedStatus('Config item `kind` must be set')
 
 
-def test_kind_no_rel(harness):
+def test_kind_no_rel(harness, begin_noop):
     harness.set_leader(True)
 
     harness.update_config({'kind': 'ingress'})
@@ -85,18 +27,7 @@ def test_kind_no_rel(harness):
     assert harness.charm.model.unit.status == BlockedStatus('Waiting for istio-pilot relation')
 
 
-def get_unique_calls(call_args_list):
-    uniques = []
-    for call in call_args_list:
-        if call in uniques:
-            continue
-        else:
-            uniques.append(call)
-
-    return uniques
-
-
-def test_install_apply(configured_harness, kind, mocked_client):
+def test_install_apply(configured_harness, get_unique_calls, kind, mocked_client):
     actual_objects = []
     expected_objects = list(yaml.safe_load_all(open(f'tests/{kind}-example.yaml')))
 
@@ -141,17 +72,17 @@ def test_removal(configured_harness, kind, mocked_client, mocker):
 
     assert expected_kind_name_list == actual_kind_name_list
 
-
-def test_removal_with_load_resource_error(configured_harness, mocker):
-    mocker.patch('charm.codecs.load_all_yaml', side_effect=LoadResourceError('mocked error'))
-    # Ensure we raise the exception
-    with pytest.raises(LoadResourceError):
-        configured_harness.charm.on.remove.emit()
-
-
-def test_removal_with_unauthorized_error(configured_harness, mocked_client, mocker):
+    # Test exceptions
+    # ApiError with unauthorized message should be ignored
     api_error = ApiError(response=mocker.MagicMock())
     api_error.status.message = "(Unauthorized)"
     mocked_client.return_value.delete.side_effect = api_error
     # Ensure we DO NOT raise the exception
     configured_harness.charm.on.remove.emit()
+
+    # Other ApiErrors should raise exceptions
+    api_error = ApiError(response=mocker.MagicMock())
+    api_error.status.message = "mocked error"
+    mocked_client.return_value.delete.side_effect = api_error
+    with pytest.raises(ApiError):
+        configured_harness.charm.on.remove.emit()
