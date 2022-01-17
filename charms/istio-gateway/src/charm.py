@@ -90,8 +90,10 @@ class Operator(CharmBase):
         except ApiError as err:
             if "(Unauthorized)" in err.status.message:
                 # Ignore error from https://bugs.launchpad.net/juju/+bug/1941655
-                pass
+                self.log.error(f"Ignoring unauthorized error during cleanup:\n{err.status.message}")
             else:
+                # But surface any other errors
+                self.log.error(err.status.message)
                 raise
 
 

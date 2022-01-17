@@ -191,15 +191,14 @@ class Operator(CharmBase):
             else:
                 kwargs["unit_prefix"] = prefix + "-unit-{}"
 
-            kwargs["units"] = sorted(rel.units, key=lambda u: u.name)
+            kwargs["unit_nums"] = sorted(unit.name.split("/")[-1] for unit in rel.units)
 
             return kwargs
 
-        vses = [
+        virtual_services = ''.join(
             t.render(**get_kwargs(rel, ingress.versions[app.name], route))
             for ((rel, app), route) in routes.items()
-        ]
-        virtual_services = ''.join(vses)
+        )
 
         resources = [self.virtual_service_resource, self.destination_rule_resource]
         for resource in resources:
@@ -265,11 +264,17 @@ class Operator(CharmBase):
         self._apply_manifest(manifests)
 
     def _get_gateway_address(self):
-        """Look up the load balancer address for the ingress gateway.
+        """Determine the external address for the ingress gateway.
+
+        It will prefer the `external-hostname` config if that is set, otherwise
+        it will look up the load balancer address for the ingress gateway.
 
         If the gateway isn't available or doesn't have a load balancer address yet,
         returns None.
         """
+        if self.model.config["external-hostname"]:
+            return self.model.config["external-hostname"]
+
         services = self.lightkube_client.list(Service, labels={"istio": "ingressgateway"}, namespace=self.model.name)
 
         for service in services:

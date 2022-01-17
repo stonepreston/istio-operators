@@ -82,7 +82,7 @@ def test_with_ingress_relation(harness, subprocess, get_unique_calls, get_delete
             'kind': 'VirtualService',
             'metadata': {'name': 'service-name'},
             'spec': {
-                'gateways': ['None/istio-gateway'],
+                'gateways': ['istio-gateway'],
                 'hosts': ['*'],
                 'http': [
                     {
@@ -122,6 +122,11 @@ def test_with_ingress_relation(harness, subprocess, get_unique_calls, get_delete
     # Skip the first unique apply call since that is the call for the gateway
     apply_calls = get_unique_calls(mocked_client.return_value.apply.call_args_list[1:])
     assert apply_calls[0][0][0] == expected
+
+    assert isinstance(harness.charm.model.unit.status, ActiveStatus)
+
+    harness.remove_relation(rel_id)
+    assert isinstance(harness.charm.model.unit.status, ActiveStatus)
 
 
 def test_with_ingress_relation_v3(harness, subprocess, get_unique_calls, mocked_client):
@@ -182,7 +187,7 @@ def test_with_ingress_relation_v3(harness, subprocess, get_unique_calls, mocked_
             'kind': 'VirtualService',
             'metadata': {'name': 'service-name'},
             'spec': {
-                'gateways': ['ns/istio-gateway'],
+                'gateways': ['istio-gateway'],
                 'hosts': ['*'],
                 'http': [
                     {
@@ -207,7 +212,7 @@ def test_with_ingress_relation_v3(harness, subprocess, get_unique_calls, mocked_
                                 'destination': {
                                     'host': 'service-name.ns.svc.cluster.local',
                                     'port': {'number': 6666},
-                                    'subset': 'app-0',
+                                    'subset': 'service-name-0',
                                 }
                             }
                         ],
@@ -221,7 +226,7 @@ def test_with_ingress_relation_v3(harness, subprocess, get_unique_calls, mocked_
                                 'destination': {
                                     'host': 'service-name.ns.svc.cluster.local',
                                     'port': {'number': 6666},
-                                    'subset': 'app-1',
+                                    'subset': 'service-name-1',
                                 }
                             }
                         ],
@@ -236,8 +241,14 @@ def test_with_ingress_relation_v3(harness, subprocess, get_unique_calls, mocked_
             'spec': {
                 'host': 'service-name.ns.svc.cluster.local',
                 'subsets': [
-                    {'labels': {'statefulset.kubernetes.io/pod-name': 'app-0'}, 'name': 'app-0'},
-                    {'labels': {'statefulset.kubernetes.io/pod-name': 'app-1'}, 'name': 'app-1'},
+                    {
+                        'labels': {'statefulset.kubernetes.io/pod-name': 'service-name-0'},
+                        'name': 'service-name-0',
+                    },
+                    {
+                        'labels': {'statefulset.kubernetes.io/pod-name': 'service-name-1'},
+                        'name': 'service-name-1',
+                    },
                 ],
             },
         },
@@ -246,7 +257,7 @@ def test_with_ingress_relation_v3(harness, subprocess, get_unique_calls, mocked_
             'kind': 'VirtualService',
             'metadata': {'name': 'app2'},
             'spec': {
-                'gateways': ['ns/istio-gateway'],
+                'gateways': ['istio-gateway'],
                 'hosts': ['*'],
                 'http': [
                     {
