@@ -121,17 +121,17 @@ class Operator(CharmBase):
         resources = [self.virtual_service_resource, self.destination_rule_resource, self.gateway_resource,
                      self.envoy_filter_resource, self.rbac_config_resource]
         for resource in resources:
-            self._delete_existing_resource_objects(resource, ignore_unauthorized=True)
+            self._delete_existing_resource_objects(resource, namespace=self.model.name, ignore_unauthorized=True)
 
-        self._delete_manifest(manifests, ignore_not_found=True, ignore_unauthorized=True)
+        self._delete_manifest(manifests, namespace=self.model.name, ignore_not_found=True, ignore_unauthorized=True)
 
     def handle_default_gateways(self, event):
         t = self.env.get_template('gateway.yaml.j2')
         gateways = self.model.config['default-gateways'].split(',')
         manifest = ''.join(t.render(name=g) for g in gateways)
 
-        self._delete_existing_resource_objects(self.gateway_resource)
-        self._apply_manifest(manifest)
+        self._delete_existing_resource_objects(self.gateway_resource, namespace=self.model.name)
+        self._apply_manifest(manifest, namespace=self.model.name)
 
     def send_info(self, event):
         if self.interfaces["istio-pilot"]:
@@ -202,9 +202,9 @@ class Operator(CharmBase):
 
         resources = [self.virtual_service_resource, self.destination_rule_resource]
         for resource in resources:
-            self._delete_existing_resource_objects(resource)
+            self._delete_existing_resource_objects(resource, namespace=self.model.name)
         if routes:
-            self._apply_manifest(virtual_services)
+            self._apply_manifest(virtual_services, namespace=self.model.name)
 
         # Send URL(s) back
         for (rel, app), route in routes.items():
@@ -260,8 +260,8 @@ class Operator(CharmBase):
         manifests = '\n'.join([m for m in manifests if m])
         resources = [self.envoy_filter_resource, self.rbac_config_resource]
         for resource in resources:
-            self._delete_existing_resource_objects(resource)
-        self._apply_manifest(manifests)
+            self._delete_existing_resource_objects(resource, namespace=self.model.name)
+        self._apply_manifest(manifests, namespace=self.model.name)
 
     def _get_gateway_address(self):
         """Determine the external address for the ingress gateway.
@@ -283,30 +283,37 @@ class Operator(CharmBase):
                 return ingress_points[0].ip
         return None
 
-    def _delete_object(self, obj, ignore_not_found=False, ignore_unauthorized=False):
+    def _delete_object(self, obj, namespace=None, ignore_not_found=False, ignore_unauthorized=False):
         try:
-            self.lightkube_client.delete(obj.__class__, obj.metadata.name)
+            self.lightkube_client.delete(obj.__class__, obj.metadata.name, namespace=namespace)
         except ApiError as err:
-            if "not found" in err.status.message and ignore_not_found:
-                pass
-            elif "(Unauthorized)" in err.status.message and ignore_unauthorized:
-                # Todo: Test if unauthorized stuff is even needed with light kube
-                pass
+            self.log.error(f"ApiError encountered while attempting to delete resource.")
+            if err.status.message is not None:
+                if "not found" in err.status.message and ignore_not_found:
+                    self.log.error(f"Ignoring not found error:\n{err.status.message}")
+                elif "(Unauthorized)" in err.status.message and ignore_unauthorized:
+                    # Ignore error from https://bugs.launchpad.net/juju/+bug/1941655
+                    self.log.error(f"Ignoring unauthorized error:\n{err.status.message}")
+                else:
+                    self.log.error(err.status.message)
+                    raise
             else:
-                self.log.error(f"ApiError encountered when attempting to delete resource. {err.status.message}")
                 raise
 
-    def _delete_existing_resource_objects(self, resource, ignore_not_found=False, ignore_unauthorized=False):
+    def _delete_existing_resource_objects(self, resource, namespace=None, ignore_not_found=False,
+                                          ignore_unauthorized=False):
         for obj in self.lightkube_client.list(resource, labels={"app.juju.is/created-by": f"{self.app.name}"}):
-            self._delete_object(obj, ignore_not_found=ignore_not_found, ignore_unauthorized=ignore_unauthorized)
+            self._delete_object(obj, namespace=namespace, ignore_not_found=ignore_not_found,
+                                ignore_unauthorized=ignore_unauthorized)
 
-    def _apply_manifest(self, manifest):
+    def _apply_manifest(self, manifest, namespace=None):
         for obj in codecs.load_all_yaml(manifest):
-            self.lightkube_client.apply(obj)
+            self.lightkube_client.apply(obj, namespace=namespace)
 
-    def _delete_manifest(self, manifest, ignore_not_found=False, ignore_unauthorized=False):
+    def _delete_manifest(self, manifest, namespace=None, ignore_not_found=False, ignore_unauthorized=False):
         for obj in codecs.load_all_yaml(manifest):
-            self._delete_object(obj, ignore_not_found=ignore_not_found, ignore_unauthorized=ignore_unauthorized)
+            self._delete_object(obj, namespace=namespace, ignore_not_found=ignore_not_found,
+                                ignore_unauthorized=ignore_unauthorized)
 
 
 if __name__ == "__main__":

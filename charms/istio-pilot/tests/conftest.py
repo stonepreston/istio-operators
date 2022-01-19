@@ -3,6 +3,39 @@ from charm import Operator
 from ops.testing import Harness
 
 
+class Helpers:
+    @staticmethod
+    def get_unique_calls(call_args_list):
+        uniques = []
+        for call in call_args_list:
+            if call in uniques:
+                continue
+            else:
+                uniques.append(call)
+        return uniques
+
+    @staticmethod
+    def get_deleted_resource_types(delete_calls):
+        deleted_resource_types = []
+        for call in delete_calls:
+            resource_type = call[0][0]
+            deleted_resource_types.append(resource_type)
+        return deleted_resource_types
+
+    @staticmethod
+    def calls_contain_namespace(calls, harness):
+        for call in calls:
+            # Ensure the namespace is included in the call
+            if call.kwargs['namespace'] != harness.model.name:
+                return False
+        return True
+
+
+@pytest.fixture(scope="session")
+def helpers():
+    return Helpers()
+
+
 @pytest.fixture()
 def get_unique_calls():
     def func(call_args_list):
@@ -25,6 +58,18 @@ def get_deleted_resource_types():
             resource_type = call[0][0]
             deleted_resource_types.append(resource_type)
         return deleted_resource_types
+
+    return func
+
+
+@pytest.fixture()
+def calls_contain_namespace():
+    def func(calls, harness):
+        for call in calls:
+            # Ensure the namespace is included in the call
+            if call.kwargs['namespace'] != harness.model.name:
+                return False
+        return True
 
     return func
 

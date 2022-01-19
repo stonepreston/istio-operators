@@ -4,25 +4,9 @@ from charm import Operator
 from ops.testing import Harness
 
 
-@pytest.fixture
-def harness():
-    return Harness(Operator)
-
-
-@pytest.fixture()
-def begin_noop():
-    def func(harness):
-        # Most of the tests use these lines to kick things off
-        harness.begin_with_initial_hooks()
-        container = harness.model.unit.get_container('noop')
-        harness.charm.on['noop'].pebble_ready.emit(container)
-
-    return func
-
-
-@pytest.fixture()
-def get_unique_calls():
-    def func(call_args_list):
+class Helpers:
+    @staticmethod
+    def get_unique_calls(call_args_list):
         uniques = []
         for call in call_args_list:
             if call in uniques:
@@ -31,7 +15,22 @@ def get_unique_calls():
                 uniques.append(call)
         return uniques
 
-    return func
+    @staticmethod
+    def begin_noop(harness):
+        # Most of the tests use these lines to kick things off
+        harness.begin_with_initial_hooks()
+        container = harness.model.unit.get_container('noop')
+        harness.charm.on['noop'].pebble_ready.emit(container)
+
+
+@pytest.fixture(scope="session")
+def helpers():
+    return Helpers()
+
+
+@pytest.fixture
+def harness():
+    return Harness(Operator)
 
 
 # Autouse to prevent calling out to the k8s API via lightkube
@@ -40,14 +39,16 @@ def mocked_client(mocker):
     client = mocker.patch("charm.Client")
     yield client
 
-
+# This is used to parameterize tests for both egress and ingress
+# If a test uses this fixture, it will be run once for each param in the list
+# See the configured harness test below for an example of how it can be used
 @pytest.fixture(params=["ingress", "egress"])
 def kind(request):
     return request.param
 
 
 @pytest.fixture()
-def configured_harness(harness, begin_noop, kind):
+def configured_harness(harness, kind, helpers):
     harness.set_leader(True)
 
     harness.update_config({'kind': kind})
@@ -69,6 +70,6 @@ def configured_harness(harness, begin_noop, kind):
         {"_supported_versions": "- v1", "data": yaml.dump(data)},
     )
 
-    begin_noop(harness)
+    helpers.begin_noop(harness)
 
     return harness

@@ -51,7 +51,7 @@ def test_default_gateways(harness, subprocess):
     },
 
 
-def test_with_ingress_relation(harness, subprocess, get_unique_calls, get_deleted_resource_types, mocked_client):
+def test_with_ingress_relation(harness, subprocess, mocked_client, helpers):
     check_call = subprocess.check_call
 
     harness.set_leader(True)
@@ -116,11 +116,13 @@ def test_with_ingress_relation(harness, subprocess, get_unique_calls, get_delete
         )
     ]
 
-    delete_calls = get_unique_calls(mocked_client.return_value.delete.call_args_list)
-    assert get_deleted_resource_types(delete_calls[1:]) == ['VirtualService', 'DestinationRule']
+    delete_calls = helpers.get_unique_calls(mocked_client.return_value.delete.call_args_list)
+    assert helpers.calls_contain_namespace(delete_calls, harness)
+    assert helpers.get_deleted_resource_types(delete_calls[1:]) == ['VirtualService', 'DestinationRule']
 
     # Skip the first unique apply call since that is the call for the gateway
-    apply_calls = get_unique_calls(mocked_client.return_value.apply.call_args_list[1:])
+    apply_calls = helpers.get_unique_calls(mocked_client.return_value.apply.call_args_list[1:])
+    assert helpers.calls_contain_namespace(apply_calls, harness)
     assert apply_calls[0][0][0] == expected
 
     assert isinstance(harness.charm.model.unit.status, ActiveStatus)
@@ -129,7 +131,7 @@ def test_with_ingress_relation(harness, subprocess, get_unique_calls, get_delete
     assert isinstance(harness.charm.model.unit.status, ActiveStatus)
 
 
-def test_with_ingress_relation_v3(harness, subprocess, get_unique_calls, mocked_client):
+def test_with_ingress_relation_v3(harness, subprocess, mocked_client, helpers):
     harness.set_leader(True)
     harness.add_oci_resource(
         "noop",
@@ -278,7 +280,8 @@ def test_with_ingress_relation_v3(harness, subprocess, get_unique_calls, mocked_
         },
     ]
 
-    apply_calls = get_unique_calls(mocked_client.return_value.apply.call_args_list)
+    apply_calls = helpers.get_unique_calls(mocked_client.return_value.apply.call_args_list)
+    assert helpers.calls_contain_namespace(apply_calls, harness)
     apply_args = []
     # Skip the first unique call since that is the call for the gateway
     for call in apply_calls[1:]:
@@ -297,7 +300,7 @@ def test_with_ingress_relation_v3(harness, subprocess, get_unique_calls, mocked_
     }
 
 
-def test_with_ingress_auth_relation(harness, subprocess, get_unique_calls, get_deleted_resource_types, mocked_client):
+def test_with_ingress_auth_relation(harness, subprocess, mocked_client, helpers):
     check_call = subprocess.check_call
 
     harness.set_leader(True)
@@ -380,10 +383,13 @@ def test_with_ingress_auth_relation(harness, subprocess, get_unique_calls, get_d
         )
     ]
 
-    delete_calls = get_unique_calls(mocked_client.return_value.delete.call_args_list)
-    assert get_deleted_resource_types(delete_calls[1:]) == ['EnvoyFilter', 'RbacConfig']
+    delete_calls = helpers.get_unique_calls(mocked_client.return_value.delete.call_args_list)
+    assert helpers.calls_contain_namespace(delete_calls, harness)
+    # Skip the first unique call since that is the call for the gateway
+    assert helpers.get_deleted_resource_types(delete_calls[1:]) == ['EnvoyFilter', 'RbacConfig']
 
-    apply_calls = get_unique_calls(mocked_client.return_value.apply.call_args_list)
+    apply_calls = helpers.get_unique_calls(mocked_client.return_value.apply.call_args_list)
+    assert helpers.calls_contain_namespace(apply_calls, harness)
     apply_args = []
     # Skip the first unique call since that is the call for the gateway
     for call in apply_calls[1:]:
@@ -393,7 +399,7 @@ def test_with_ingress_auth_relation(harness, subprocess, get_unique_calls, get_d
     assert isinstance(harness.charm.model.unit.status, ActiveStatus)
 
 
-def test_removal(harness, subprocess, mocked_client, get_deleted_resource_types, mocker):
+def test_removal(harness, subprocess, mocked_client, helpers, mocker):
     check_output = subprocess.check_output
 
     mocked_yaml_object = mocker.Mock()
@@ -431,11 +437,12 @@ def test_removal(harness, subprocess, mocked_client, get_deleted_resource_types,
     assert check_output.call_args_list[0].kwargs == {}
 
     delete_calls = mocked_client.return_value.delete.call_args_list
+    assert helpers.calls_contain_namespace(delete_calls, harness)
     # The 2 mock objects at the end are the "resources" that get returned from the mocked load_all_yaml call when
     # loading the resources from the manifest.
-    assert get_deleted_resource_types(delete_calls) == ['VirtualService', 'DestinationRule', 'Gateway', 'EnvoyFilter',
-                                                        'RbacConfig', 'ResourceObjectFromYaml',
-                                                        'ResourceObjectFromYaml']
+    assert helpers.get_deleted_resource_types(delete_calls) == ['VirtualService', 'DestinationRule', 'Gateway',
+                                                                'EnvoyFilter','RbacConfig', 'ResourceObjectFromYaml',
+                                                                'ResourceObjectFromYaml']
     # Now test the exceptions that should be ignored
     # ApiError
     api_error = ApiError(response=mocker.MagicMock())
@@ -459,8 +466,14 @@ def test_removal(harness, subprocess, mocked_client, get_deleted_resource_types,
     with pytest.raises(ApiError):
         harness.charm.on.remove.emit()
 
+    # Test with nonexistent status message
+    api_error.status.message = None
+    mocked_client.return_value.delete.side_effect = api_error
+    with pytest.raises(ApiError):
+        harness.charm.on.remove.emit()
 
-def test_handle_default_gateways(harness, mocked_client, get_deleted_resource_types):
+
+def test_handle_default_gateways(harness, mocked_client, helpers):
     harness.set_leader(True)
     harness.begin_with_initial_hooks()
     container = harness.model.unit.get_container('noop')
@@ -471,4 +484,5 @@ def test_handle_default_gateways(harness, mocked_client, get_deleted_resource_ty
 
     harness.charm.on.config_changed.emit()
     delete_calls = mocked_client.return_value.delete.call_args_list
-    assert get_deleted_resource_types(delete_calls) == ['Gateway']
+    assert helpers.calls_contain_namespace(delete_calls, harness)
+    assert helpers.get_deleted_resource_types(delete_calls) == ['Gateway']

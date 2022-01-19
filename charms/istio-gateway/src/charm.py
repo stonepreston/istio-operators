@@ -88,12 +88,16 @@ class Operator(CharmBase):
             for obj in codecs.load_all_yaml(rendered):
                 self.lightkube_client.delete(obj.__class__, obj.metadata.name, namespace=obj.metadata.namespace)
         except ApiError as err:
-            if "(Unauthorized)" in err.status.message:
-                # Ignore error from https://bugs.launchpad.net/juju/+bug/1941655
-                self.log.error(f"Ignoring unauthorized error during cleanup:\n{err.status.message}")
+            self.log.error(f"ApiError encountered while attempting to delete resource.")
+            if err.status.message is not None:
+                if "(Unauthorized)" in err.status.message:
+                    # Ignore error from https://bugs.launchpad.net/juju/+bug/1941655
+                    self.log.error(f"Ignoring unauthorized error during cleanup:\n{err.status.message}")
+                else:
+                    # But surface any other errors
+                    self.log.error(err.status.message)
+                    raise
             else:
-                # But surface any other errors
-                self.log.error(err.status.message)
                 raise
 
 

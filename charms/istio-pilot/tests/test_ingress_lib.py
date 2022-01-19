@@ -7,6 +7,9 @@ from charms.istio_pilot.v0.ingress import IngressRequirer, MockIngressProvider
 
 
 class TestRequirerCharm(CharmBase):
+    # Prevents Pytest warning about not collecting test case since this class name starts with Test
+    __test__ = False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ingress = IngressRequirer(self, port=80, per_unit_routes=True)
