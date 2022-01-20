@@ -2,14 +2,8 @@ from unittest.mock import call as Call
 
 import pytest
 import yaml
-from charm import Operator
 from ops.model import ActiveStatus, WaitingStatus
-from ops.testing import Harness
-
-
-@pytest.fixture
-def harness():
-    return Harness(Operator)
+from lightkube.core.exceptions import ApiError
 
 
 def test_not_leader(harness):
@@ -17,8 +11,8 @@ def test_not_leader(harness):
     assert harness.charm.model.unit.status == WaitingStatus('Waiting for leadership')
 
 
-def test_basic(harness, mocker):
-    check_call = mocker.patch('subprocess.check_call')
+def test_basic(harness, subprocess, mocker):
+    check_call = subprocess.check_call
     harness.set_leader(True)
     harness.begin_with_initial_hooks()
     container = harness.model.unit.get_container('noop')
@@ -41,9 +35,8 @@ def test_basic(harness, mocker):
     assert harness.charm.model.unit.status == ActiveStatus('')
 
 
-def test_with_ingress_relation(harness, mocker):
-    run = mocker.patch('subprocess.run')
-    check_call = mocker.patch('subprocess.check_call')
+def test_with_ingress_relation(harness, subprocess, mocked_client, helpers, mocker):
+    check_call = subprocess.check_call
 
     harness.set_leader(True)
     harness.add_oci_resource(
@@ -65,7 +58,7 @@ def test_with_ingress_relation(harness, mocker):
     )
     harness.begin_with_initial_hooks()
 
-    expected = [
+    apply_expected = [
         {
             'apiVersion': 'networking.istio.io/v1alpha3',
             'kind': 'VirtualService',
@@ -116,30 +109,24 @@ def test_with_ingress_relation(harness, mocker):
         )
     ]
 
-    assert len(run.call_args_list) == 4
+    delete_calls = helpers.get_unique_calls(mocked_client.return_value.delete.call_args_list)
+    assert helpers.calls_contain_namespace(delete_calls, harness.model.name)
+    actual_res_names = helpers.get_deleted_resource_types(delete_calls)
+    expected_res_names = ['VirtualService', 'Gateway']
+    assert helpers.compare_deleted_resource_names(actual_res_names, expected_res_names)
 
-    for call in run.call_args_list[::2]:
-        args = [
-            './kubectl',
-            'delete',
-            'virtualservices,gateways',
-            '-lapp.juju.is/created-by=istio-pilot',
-            '-n',
-            None,
-        ]
-        assert call.args == (args,)
-
-    for call in run.call_args_list[1::2]:
-        expected_input = list(yaml.safe_load_all(call.kwargs['input']))
-        assert call.args == (['./kubectl', 'apply', '-f-'],)
-        assert expected_input == expected
+    apply_calls = helpers.get_unique_calls(mocked_client.return_value.apply.call_args_list)
+    assert helpers.calls_contain_namespace(apply_calls, harness.model.name)
+    apply_args = []
+    for call in apply_calls:
+        apply_args.append(call[0][0])
+    assert apply_args == apply_expected
 
     assert isinstance(harness.charm.model.unit.status, ActiveStatus)
 
 
-def test_with_ingress_auth_relation(harness, mocker):
-    run = mocker.patch('subprocess.run')
-    check_call = mocker.patch('subprocess.check_call')
+def test_with_ingress_auth_relation(harness, subprocess, helpers, mocked_client, mocker):
+    check_call = subprocess.check_call
 
     harness.set_leader(True)
     harness.add_oci_resource(
@@ -221,22 +208,101 @@ def test_with_ingress_auth_relation(harness, mocker):
         )
     ]
 
-    assert len(run.call_args_list) == 4
+    delete_calls = helpers.get_unique_calls(mocked_client.return_value.delete.call_args_list)
+    assert helpers.calls_contain_namespace(delete_calls, harness.model.name)
+    actual_res_names = helpers.get_deleted_resource_types(delete_calls)
+    expected_res_names = ['EnvoyFilter', 'RbacConfig']
+    assert helpers.compare_deleted_resource_names(actual_res_names, expected_res_names)
 
-    for call in run.call_args_list[::2]:
-        args = [
-            './kubectl',
-            'delete',
-            'envoyfilters,rbacconfigs',
-            '-lapp.juju.is/created-by=istio-pilot',
-            '-n',
-            None,
-        ]
-        assert call.args == (args,)
-
-    for call in run.call_args_list[1::2]:
-        expected_input = list(yaml.safe_load_all(call.kwargs['input']))
-        assert call.args == (['./kubectl', 'apply', '-f-'],)
-        assert expected_input == expected
+    apply_calls = helpers.get_unique_calls(mocked_client.return_value.apply.call_args_list)
+    assert helpers.calls_contain_namespace(apply_calls, harness.model.name)
+    apply_args = []
+    for call in apply_calls:
+        apply_args.append(call[0][0])
+    assert apply_args == expected
 
     assert isinstance(harness.charm.model.unit.status, ActiveStatus)
+
+
+def test_removal(harness, subprocess, mocked_client, helpers, mocker):
+    check_output = subprocess.check_output
+
+    mocked_yaml_object = mocker.Mock()
+    mocked_yaml_object.__class__ = "ResourceObjectFromYaml"
+    mocker.patch(
+        'charm.codecs.load_all_yaml', return_value=[mocked_yaml_object, mocked_yaml_object]
+    )
+    harness.set_leader(True)
+    harness.add_oci_resource(
+        "noop",
+        {
+            "registrypath": "",
+            "username": "",
+            "password": "",
+        },
+    )
+
+    harness.begin_with_initial_hooks()
+
+    # Reset the mock so that the calls list does not include any calls from other hooks
+    mocked_client.reset_mock()
+    harness.charm.on.remove.emit()
+
+    expected_args = [
+        "./istioctl",
+        "manifest",
+        "generate",
+        "-s",
+        "profile=minimal",
+        "-s",
+        f"values.global.istioNamespace={None}",
+    ]
+
+    assert len(check_output.call_args_list) == 1
+    assert check_output.call_args_list[0].args == (expected_args,)
+    assert check_output.call_args_list[0].kwargs == {}
+
+    delete_calls = mocked_client.return_value.delete.call_args_list
+    assert helpers.calls_contain_namespace(delete_calls, harness.model.name)
+    actual_res_names = helpers.get_deleted_resource_types(delete_calls)
+    # The 2 mock objects at the end are the "resources" that get returned from the mocked
+    # load_all_yaml call when loading the resources from the manifest.
+    expected_res_names = [
+        'VirtualService',
+        'Gateway',
+        'EnvoyFilter',
+        'RbacConfig',
+        'ResourceObjectFromYaml',
+        'ResourceObjectFromYaml',
+    ]
+    assert helpers.compare_deleted_resource_names(actual_res_names, expected_res_names)
+
+    # Now test the exceptions that should be ignored
+    # ApiError
+    api_error = ApiError(response=mocker.MagicMock())
+    # # ApiError with not found message should be ignored
+    api_error.status.message = "something not found"
+    mocked_client.return_value.delete.side_effect = api_error
+    # mock out the _delete_existing_resource_objects method since we dont want the ApiError
+    # to be thrown there
+    mocker.patch('charm.Operator._delete_existing_resource_objects')
+    # Ensure we DO NOT raise the exception
+    harness.charm.on.remove.emit()
+
+    # ApiError with unauthorized message should be ignored
+    api_error.status.message = "(Unauthorized)"
+    mocked_client.return_value.delete.side_effect = api_error
+    # Ensure we DO NOT raise the exception
+    harness.charm.on.remove.emit()
+
+    # Other ApiErrors should throw an exception
+    api_error.status.message = "mocked ApiError"
+    mocked_client.return_value.delete.side_effect = api_error
+    with pytest.raises(ApiError):
+        harness.charm.on.remove.emit()
+
+    # Test with nonexistent status message
+    api_error.status.message = None
+    mocked_client.return_value.delete.side_effect = api_error
+    with pytest.raises(ApiError):
+        harness.charm.on.remove.emit()
